@@ -1,0 +1,205 @@
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_USER=sd
+      - POSTGRES_PASSWORD=sdpass
+      - POSTGRES_DB=sd
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./bdd/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sd -d sd"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  adminer:
+    image: adminer:4
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+  ingestor:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db          
+      PGPORT: "5432"
+      PGUSER: sd
+      PGPASSWORD: sdpass
+      PGDATABASE: sd
+      STORAGE_JSONL: /data/storage.jsonl
+      BATCH_SIZE: "200"
+      SLEEP_SECS: "1.0"
+      INGEST_FROM_START: "1"   
+    volumes:
+      - ./storage.jsonl:/data/storage.jsonl:ro
+    command: ["python", "/app/services/ingestor/ingest_jsonl.py"]
+  redis:
+    image: redis:7-alpine
+    command: >
+      redis-server
+      --appendonly yes
+      --protected-mode no
+      --maxmemory 2mb
+      --maxmemory-policy allkeys-lru
+    ports:
+      - "6379:6379"
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: 'zookeeper:2181'
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+  api:
+    build:
+      context: .
+      dockerfile: ./docker/api.Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    environment:
+      PGHOST: db
+      PGPORT: "5432"
+      PGUSER: sd
+      PGPASSWORD: sdpass
+      PGDATABASE: sd
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      CACHE_TTL: "60"            
+      OLLAMA_HOST: "http://172.17.0.1:11434"
+      GEN_MODEL: "llama3.2:3b"
+      EVAL_MODEL: "llama3.2:1b"
+      NUM_THREAD: "2"
+      USE_KAFKA: "1"
+      KAFKA_BOOTSTRAP: "kafka:9092"
+    ports:
+      - "8000:8000"
+  worker:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      kafka:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      GEN_MODEL: "llama3.2:3b"
+      EVAL_MODEL: "llama3.2:1b"
+      OLLAMA_HOST: "http://172.17.0.1:11434"
+      NUM_THREAD: "2"
+    command: ["python", "/app/services/worker/worker.py"]
+  monitor:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      REGEN_THRESHOLD: "6"
+      EVAL_MODEL: "llama3.2:1b"
+      OLLAMA_HOST: "http://172.17.0.1:11434"
+      NUM_THREAD: "2"
+    command: ["python", "/app/services/monitor/monitor.py"]
+  retry:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      kafka:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      MAX_ATTEMPTS: "5"
+      BASE_DELAY: "1.0"
+    command: ["python", "/app/services/retry/retry.py"]
+  storage:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+    environment:
+      KAFKA_BOOTSTRAP: "kafka:9092"
+      PGHOST: "db"
+      PGPORT: "5432"
+      PGUSER: "sd"
+      PGPASSWORD: "sdpass"
+      PGDATABASE: "sd"
+      REDIS_HOST: "redis"
+      REDIS_PORT: "6379"
+      CACHE_TTL: "3600"
+    command: ["python", "/app/services/storage/storage_consumer.py"]
+  flink-jobmanager:
+    image: flink:1.17.0-scala_2.12
+    hostname: flink-jobmanager
+    ports:
+      - "8081:8081"
+    command: jobmanager
+  flink-taskmanager:
+    image: flink:1.17.0-scala_2.12
+    depends_on:
+      flink-jobmanager:
+        condition: service_started
+    command: taskmanager
+  loadgen:
+    build:
+      context: .
+      dockerfile: ./docker/python.Dockerfile
+    depends_on:
+      api:
+        condition: service_started
+      db:
+        condition: service_healthy
+    environment:
+      API_URL: "http://api:8000/query"
+      PGHOST: "db"
+      PGPORT: "5432"
+      PGUSER: "sd"
+      PGPASSWORD: "sdpass"
+      PGDATABASE: "sd"
+      DISTR: "poisson"        
+      RATE: "2"               
+      MU: "-2.0"              
+      SIGMA: "1.0"
+      SLEEP: "1"
+      SEED: "42"
+    command: ["python", "/app/services/loadgen/main.py"]
+    
+volumes:
+  pgdata:
