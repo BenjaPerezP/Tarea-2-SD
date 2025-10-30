@@ -1,16 +1,11 @@
-# Informe — Entrega 2: Pipeline asíncrono con Kafka y Flink (resumen y documentación)
+# Entrega 2: Pipeline asíncrono con Kafka y Flink (resumen y documentación)
 
 Fecha: 29 de octubre de 2025
-
-Este documento explica en detalle los cambios realizados sobre la base entregada en la Tarea 1 para cumplir
-los objetivos de la Tarea 2: introducir tolerancia a fallos y procesamiento de flujos mediante Apache Kafka
-y un paso de scoring (Flink / alternativa local). Incluye arquitectura, topología de tópicos, manejo de errores,
-ejemplos de uso y pasos para reproducir las pruebas locales.
 
 ## 1. Resumen de cambios respecto a la Tarea 1
 
 - Se desacopló la interacción síncrona con el LLM transformándola en un pipeline asíncrono:
-  - La API ya no debe llamar al LLM directamente en modo normal; opcionalmente encola peticiones en Kafka.
+- La API ya no debe llamar al LLM directamente en modo normal; opcionalmente encola peticiones en Kafka.
 - Se introdujo Apache Kafka (brokers + Zookeeper) como bus de mensajes para gestionar solicitudes y resultados.
 - Se añadió un consumidor `worker` que realiza las llamadas al LLM (generación) y publica resultados o errores.
 - Se añadió un módulo `retry` que gestiona reintentos de forma desacoplada (exponential backoff para rate limits,
@@ -29,7 +24,7 @@ Archivos añadidos / modificados (puntos clave):
 - `flink/job.py` — esqueleto PyFlink con la misma lógica (para despliegue en cluster Flink real).
 - `docker-compose.yml` — añadidos Kafka/Zookeeper, worker, retry, monitor, storage; ajustadas imágenes.
 
-## 2. Arquitectura y topología de tópicos
+## 1. Arquitectura y topología de tópicos
 
 Diagrama simplificado del flujo:
 
@@ -129,25 +124,7 @@ docker compose exec redis redis-cli GET "q:$qh"
 - Storage consumió `llm.validated` y creó un registro en `response_event` y seteó `q:<qh>` en Redis.
 - Subsecuentes consultas a la API retornaron `hit: true` y la respuesta cacheada.
 
-## 7. Cobertura de requisitos de la Tarea 2 (mapeo)
-
-- Diseño de pipeline asíncrono con Kafka: implementado.
-- Topología de tópicos y roles: documentados y implementados (ve sección 2).
-- Manejo de al menos dos tipos de errores con reintentos: implementado (`rate_limit`, `timeout`).
-- Módulos adaptados a productores/consumidores Kafka: API, worker, retry, monitor, storage: implementado.
-- Procesamiento de flujos con Flink: proporcionado `flink/job.py` como plantilla; para pruebas locales uso `monitor`.
-- Evitar ciclos infinitos: se usa contador `attempts` + `MAX_ATTEMPTS` en `monitor`/`retry`.
-- Contenerización: todo orquestado con `docker-compose.yml`.
-
-## 8. Limitaciones y próximos pasos recomendados
-
-- Reemplazar `monitor` por el job PyFlink desplegado en un cluster Flink con conectores Kafka para cumplir exactamente
-  la demanda de uso de Flink en producción.
-- Evitar `time.sleep` en `retry` usando tópicos/delayed delivery o un scheduler distribuido.
-- Añadir métricas y observabilidad (Prometheus + Grafana), y circuit-breaker para el LLM.
-- Añadir tests end-to-end automatizados (docker-compose + script de verificación).
-
-## 9. Anexos: consultas útiles y comandos de depuración
+## 7. Anexos: consultas útiles y comandos de depuración
 
 - Listar topics Kafka:
   - `docker compose exec kafka kafka-topics --bootstrap-server kafka:9092 --list`
